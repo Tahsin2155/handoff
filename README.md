@@ -1,204 +1,428 @@
 # Handoff
 
-Handoff is a Windows desktop automation agent that combines Google's Gemini computer-use interactions with PyAutoGUI. You describe a task in natural language, Gemini observes a screenshot, and the agent executes the returned mouse and keyboard actions on the local desktop.
+**Handoff** is a prototype AI computer-use agent that lets you control a computer using natural-language instructions.
 
-The project is intentionally human-in-the-loop. Actions that Gemini marks as requiring confirmation pause until you approve them with **Shift** or deny them with **Ctrl**. Actions marked as blocked are never executed.
+You give Handoff a task such as:
 
-> **Warning:** Handoff can move the real mouse and type into the active application. Run it only in a controlled desktop session, review tasks carefully, and do not use it with sensitive applications or data until you understand its behavior.
+> "Open the browser, search for the latest Python release, and save the result."
+
+The agent sends the current screen to a Gemini computer-use-supported model, receives the next actions to perform, and executes them using the mouse and keyboard.
+
+The goal is simple: **let an AI interact with a computer the way a human does.**
+
+> **Status:** Prototype
+> **Platform:** Windows
+> **Model:** Gemini models supporting computer use through the Interactions API
+
+---
+
+## How It Works
+
+Handoff operates as a continuous **see → decide → act → see again** loop.
+
+```text
+Natural-language task
+        │
+        ▼
+   Gemini API
+        │
+        │  screenshot + task
+        ▼
+  Computer-use model
+        │
+        │  action(s)
+        ▼
+   Handoff dispatcher
+        │
+        ▼
+ Mouse / Keyboard
+        │
+        ▼
+ Updated computer screen
+        │
+        └───────────────► Gemini
+```
+
+At a high level:
+
+1. You provide a task in natural language.
+2. Handoff captures the current screen.
+3. The screenshot and task are sent to Gemini.
+4. Gemini decides what computer action should happen next.
+5. Handoff dispatches that action to the appropriate function.
+6. The action is performed using PyAutoGUI.
+7. The resulting screen is captured and sent back to the model.
+8. The process continues until the model ends the interaction.
+
+Handoff maintains the Gemini interaction ID between turns so the model can continue working with the conversation context.
+
+---
+
+## Features
+
+### Natural-language computer control
+
+Give Handoff a task instead of manually describing every individual action.
+
+### Mouse and keyboard automation
+
+The execution layer currently supports:
+
+* Click
+* Double-click
+* Triple-click
+* Left/right/middle mouse actions
+* Mouse movement
+* Mouse button down/up
+* Drag and drop
+* Scrolling
+* Typing text
+* Key presses
+* Key down/up
+* Keyboard shortcuts
+* Waiting
+
+These actions are exposed through a central dispatch table that maps Gemini function calls to local execution functions.
+
+### Screenshot-based interaction
+
+Handoff captures the current display as a PNG, keeps it in memory, and encodes it as Base64 for use in the Gemini request. It can also load an existing image from disk for reproducible testing.
+
+### Safety gate
+
+Certain actions can require explicit human approval before they are executed.
+
+When Gemini requests confirmation:
+
+* **Shift** → approve the action
+* **Ctrl** → deny the action
+
+Actions explicitly marked as blocked by the safety decision are rejected automatically.
+
+The safety layer is implemented as a central gate before computer actions are executed.
+
+### Audible feedback
+
+Handoff uses different beep patterns to communicate important events, including:
+
+* Errors
+* Iteration completion
+* Task completion / transition
+* Confirmation requests
+* Blocked actions
+
+This makes important events noticeable even when the user is not watching the terminal.
+
+### Conversation logging
+
+Each run creates a Markdown log inside `convo_history/`.
+
+The log contains the assigned task and the model interactions returned during execution. This is useful for:
+
+* Debugging
+* Understanding why the agent took a particular action
+* Reviewing failed runs
+* Inspecting the model's interaction history
+
+---
 
 ## Requirements
 
-- Windows (the project imports `winsound` and uses Windows/global keyboard behavior).
-- Python 3.12 or a compatible modern Python 3 release.
-- A Gemini API key with access to the interactions API and computer-use capability.
-- An interactive desktop session. The machine must remain unlocked and the target application must be visible when Handoff is running.
+Handoff currently runs on **Windows**.
 
-Windows is the only supported platform at present. Cross-platform support is a
-future scope item and will require platform-specific implementations for
-audible notifications, global keyboard detection, desktop automation, display
-scaling, permissions, packaging, and platform-level testing.
+You need:
 
-The checked-in `requirements.txt` is a pip freeze from the development environment. It includes the direct packages and their resolved dependencies.
+* Python
+* A Gemini API key
+* The Python dependencies listed in `requirements.txt`
 
-## Installation
+Install the dependencies with:
 
-Run these commands from the project directory in PowerShell:
-
-```powershell
-git clone https://github.com/Tahsin2155/handoff.git
-python -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install -r requirements.txt
+```bash
+pip install -r requirements.txt
 ```
 
-If PowerShell blocks activation scripts, either adjust the execution policy for your user account or invoke the environment's Python directly:
+---
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+## Setup
+
+Create a `.env` file in the project root:
+
+```env
+GEMINI_API_KEY=your_gemini_api_key
 ```
 
-Create a `.env` file in the project root. The file is ignored by Git and must never contain a committed or shared secret:
+Handoff reads this value using `python-dotenv`. The application will stop at startup if `GEMINI_API_KEY` is not available.
 
-```dotenv
-GEMINI_API_KEY=your-gemini-api-key
-```
-
+---
 
 ## Running Handoff
 
-Launch from the project root so relative paths resolve correctly:
+From the project directory:
 
-```powershell
-.\.venv\Scripts\python.exe .\main.py
+```bash
+python main.py
 ```
 
-The program will:
-
-1. Ask for a natural-language task.
-2. Wait briefly, capture the current primary-screen screenshot, and send the task plus screenshot to Gemini.
-3. Execute the computer-use function calls returned by Gemini.
-4. Capture and print model output and function results.
-5. Write each interaction to `convo_history/chat1.md`.
-6. Repeat until Gemini requests `end_of_interaction`.
-7. Ask whether to continue with another instruction. Enter a new task to continue, or leave the response blank to exit.
-
-Example task input:
+You will be prompted to enter a task:
 
 ```text
-Open Notepad and type a short draft titled Meeting Notes.
+Enter the task you want to assign to the model:
 ```
 
-Keep the target application focused and avoid touching the mouse or keyboard while an action is being executed. Handoff sends screenshots of the primary display to Gemini.
+Enter a natural-language instruction and Handoff will begin the computer-use loop.
 
-## Safety controls
+---
 
-Gemini can attach a `safety_decision` to an action. `executions.hands.needs_gate()` enforces that decision before PyAutoGUI is called:
+## Safety Controls
 
-| Decision | Behavior |
-| --- | --- |
-| `allow` or missing decision | The action proceeds immediately. |
-| `require_confirmation` | Handoff beeps and waits for **Shift** to approve or **Ctrl** to deny. |
-| `blocked` | Handoff beeps, prints the explanation, and skips the action. |
+Handoff does not blindly execute every action returned by the model.
 
-When an action is denied or blocked, the result is passed back into the interaction loop so Gemini can react. Audible signals are also used for errors, completed iterations, task transitions, confirmation requests, and blocked actions.
+A computer-use action may include a `safety_decision`. The execution layer checks this decision before allowing the action to reach PyAutoGUI.
 
-The keyboard confirmation listener uses the `keyboard` package to poll global key state. Windows security software, permissions, remote sessions, or another application may affect global key detection.
+### Confirmation required
 
-## Coordinate system
-
-Gemini computer-use coordinates are expected in the normalized range `0` to `999`. The agent converts them to pixel coordinates using the primary display size captured when `executions.hands` is imported:
+When an action requires confirmation, Handoff emits an audible alert and waits for a key press.
 
 ```text
-pixel_x = normalized_x / 999 * screen_width
-pixel_y = normalized_y / 999 * screen_height
+Shift → Approve
+Ctrl  → Deny
 ```
 
-The display size is not refreshed during a run. Changing display configuration, scaling, or the primary monitor after startup can therefore make coordinates inaccurate. Values outside `0` to `999` are not clamped.
+### Blocked action
 
+When the safety decision is `blocked`, the action is not executed and the reason is reported back to the interaction loop.
 
-# Project Structure
+This allows the model and the local execution layer to participate in a safety boundary rather than giving the model unrestricted control of the machine.
 
+---
+
+## Project Structure
+
+```text
+Handoff/
+│
+├── convo_history/
+│   └── # Generated interaction logs
+│
+├── executions/
+│   ├── __init__.py
+│   └── hands.py
+│
+├── main.py
+├── README.md
+└── requirements.txt
 ```
-handoff/                    
-├── convo_history           Runtime conversation log; create before first run
-├── executions              
-│   ├── __init__.py         Screenshot, image encoding, and audible feedback
-│   └── hands.py            Coordinate conversion, safety gate, and PyAutoGUI actions
-├── main.py                 Gemini client, dispatch table, and interaction loop
-├── README.md               
-└── requirements.txt        Pinned development-environment dependencies
-```
-
-
 
 ### `main.py`
 
-- Loads `GEMINI_API_KEY` with `python-dotenv`.
-- Creates a `google.genai.Client`.
-- Builds text, screenshot, and function-result input blocks.
-- Maintains the Gemini `previous_interaction_id` for multi-turn context.
-- Registers the desktop `computer_use` tool and an `end_of_interaction` function.
-- Dispatches returned function calls to `executions.hands`.
-- Logs serialized interaction objects as Markdown/JSON.
-- Provides the command-line task prompt and continuation prompt.
+The main orchestration layer.
 
-The default model passed to `get_interaction()` is `gemini-3.5-flash-lite`. To use another model, change the default or pass a different model from Python code before the initial request.
+It is responsible for:
+
+* Loading configuration
+* Creating the Gemini client
+* Building API input blocks
+* Sending screenshots and instructions to Gemini
+* Maintaining interaction state
+* Receiving model outputs
+* Dispatching computer-use actions
+* Handling task completion
+* Writing conversation logs
+
+The Gemini request uses the `computer_use` tool with the `desktop` environment, along with a custom `end_of_interaction` function for ending an interaction.
 
 ### `executions/__init__.py`
 
-This module provides the visual and audible utilities:
+This module provides the **vision/input side** of Handoff.
 
-- `screen_cap(intent=None)`: captures the primary screen as a base64-encoded PNG.
-- `get_img(path)`: reads an existing file and returns its base64 contents. It checks that the path is a non-empty string, exists, and is a file, but does not validate the image format.
-- `beep_alert_error()`: one long low-frequency error beep.
-- `beep_iteration_complete()`: one iteration-complete beep.
-- `beep_task_end_or_next()`: three short transition beeps.
-- `beep_require_confirmation()`: two confirmation-request beeps.
-- `beep_action_blocked()`: three blocked-action beeps.
+It contains functions for:
+
+* Capturing the screen
+* Encoding screenshots as Base64
+* Loading existing images
+* Producing audible status signals
+
+The screenshot capture uses PyAutoGUI and writes the PNG into an in-memory buffer rather than creating a temporary screenshot file.
 
 ### `executions/hands.py`
 
-All action functions accept Gemini-style arguments and log the action intent. Mouse coordinates are normalized as described above. Most actions accept an optional `safety_decision`.
+This module provides the **action/execution side** of Handoff.
 
-| Function | Effect |
-| --- | --- |
-| `denormalize_coordinates(x, y)` | Converts normalized coordinates to screen pixels. |
-| `click(x, y, intent, safety_decision=None)` | Single left click. |
-| `double_click(...)` | Double left click. |
-| `triple_click(...)` | Triple left click. |
-| `middle_click(...)` | Middle click. |
-| `right_click(...)` | Right click. |
-| `mouse_down(...)` | Presses a mouse button. |
-| `mouse_up(...)` | Releases a mouse button. |
-| `move(...)` | Moves the pointer. |
-| `type(text, intent, press_enter=False, safety_decision=None)` | Types text and optionally presses Enter. |
-| `drag_and_drop(start_x, start_y, end_x, end_y, intent, safety_decision=None)` | Drags between two normalized positions. |
-| `wait(intent, seconds=1, safety_decision=None)` | Pauses for a number of seconds. |
-| `press_key(key, intent, safety_decision=None)` | Presses one key. |
-| `key_down(key, intent, safety_decision=None)` | Holds one key down. |
-| `key_up(key, intent, safety_decision=None)` | Releases one key. |
-| `hotkey(keys, intent, safety_decision=None)` | Presses a list of keys together. |
-| `scroll(x, y, direction, intent, magnitude_in_wheel_clicks=3, safety_decision=None)` | Moves to a position and scrolls up, down, left, or right. |
+Think of it as the agent's hands.
 
-## Conversation history
+It receives the normalized coordinates and arguments produced by the computer-use model and translates them into real mouse and keyboard operations through PyAutoGUI.
 
-At startup, `main.py` overwrites `convo_history/chat1.md` with the task text. Each interaction is then appended as formatted JSON. The log is useful for debugging and auditing, but screenshots or model payloads may contain sensitive desktop information. Treat the directory as sensitive and do not commit it.
+---
 
-The current implementation always uses the filename `chat1.md`; starting a new run replaces the previous log.
+## Coordinate System
 
+Computer-use models operate using normalized coordinates in the range:
 
-## Troubleshooting
+```text
+0 → 999
+```
 
-### `GEMINI_API_KEY is not set`
+Handoff converts these coordinates into actual screen pixels based on the current display resolution.
 
-Confirm that `.env` is in the same directory from which `main.py` is launched and contains `GEMINI_API_KEY=...`. Do not put quotes around the variable unless they are intended to be part of the value.
+```python
+x_pixel = x / 999 * screen_width
+y_pixel = y / 999 * screen_height
+```
 
+This allows model-generated coordinates to remain independent of the user's actual screen resolution.
 
-### PyAutoGUI acts on the wrong location
+---
 
-Keep the same primary display configuration throughout the run. Make sure the intended application is visible and focused, and account for Windows display scaling or multiple monitors.
+## Interaction Lifecycle
 
-### Confirmation keys do not work
+A simplified version of the internal flow looks like this:
 
-Ensure the terminal and desktop session permit global keyboard detection. Try running in a local, unlocked Windows session and check whether security software is restricting the `keyboard` package.
+```plaintext
+task
+  ↓
+capture screenshot
+  ↓
+send task + screenshot to Gemini
+  ↓
+receive interaction steps
+  ↓
+for each step:
+    ├── model output → display it
+    │
+    └── function call
+          ↓
+       dispatch action
+          ↓
+       safety gate
+          ↓
+       PyAutoGUI
+          ↓
+       report result
+  ↓
+capture new screenshot
+  ↓
+continue interaction
+```
 
-### The program stops with a model/API error
+The dispatcher is intentionally centralized, making it straightforward to add or replace executable actions.
 
-Check the API key, network connection, enabled Gemini API access, selected model availability, and the serialized interaction entry in `convo_history/chat1.md`.
+---
 
-## Development notes
+## Supported Gemini Models
 
-- Do not commit `.env`, API keys, conversation history, or screenshots.
-- Test automation against harmless applications first.
-- Keep the target desktop stable during an interaction.
-- The code currently performs work at module import time: importing `main.py` prompts for a task and starts the agent. Use the script entry point for normal operation.
-- There is no automated test suite in the repository yet.
+Handoff is designed around Gemini's **computer-use capability through the Interactions API** rather than being tied to a single model (Default to `gemini-3.5-flash-lite`). 
 
-## Future scope
+The model is passed when creating an interaction, so the configured model can be changed without changing the execution architecture.
 
-The project is currently Windows-only. A future release may extend Handoff to
-macOS and Linux. That work will likely include replacing or abstracting the
-Windows-only `winsound` notifications, validating cross-platform global
-keyboard input, adapting PyAutoGUI behavior and permissions, handling display
-scaling and multi-monitor differences, and adding platform-specific automated
-tests and installation instructions.
+---
+
+## Current Limitations
+
+Handoff is still a prototype.
+
+### Windows only
+
+The current implementation relies on Windows-specific functionality such as Python's `winsound` module, so it is not currently portable to macOS or Linux.
+
+There is future scope for replacing the platform-specific pieces with cross-platform implementations.
+
+### Screen-level automation
+
+Handoff interacts with applications through the computer's graphical interface rather than through application-specific APIs.
+
+That makes the system flexible, but also means performance depends on factors such as:
+
+* Screen layout
+* Application state
+* Visual changes
+* Model accuracy
+* Timing of UI updates
+
+### Prototype safety model
+
+The current confirmation mechanism is intentionally simple: the user can approve or deny a gated action through global keyboard input.
+
+It should be treated as a prototype safety mechanism rather than a complete security boundary.
+
+---
+
+## Why Handoff?
+
+Traditional automation usually requires you to explicitly describe the steps:
+
+```text
+1. Open the browser
+2. Click the address bar
+3. Type the URL
+4. Press Enter
+5. Click the button
+...
+```
+
+Handoff instead aims for:
+
+```text
+"Open the website and complete the task."
+```
+
+The model determines the intermediate actions from what it sees on the screen.
+
+That makes the automation layer more flexible and potentially applicable to applications that do not expose convenient APIs.
+
+---
+
+## Development
+
+The project is intentionally structured around three main responsibilities:
+
+```text
+Vision
+  └── screenshots and image encoding
+
+Reasoning
+  └── Gemini computer-use model
+
+Execution
+  └── mouse and keyboard control
+```
+
+Keeping these responsibilities separate makes it easier to experiment with different models, execution methods, and safety mechanisms without rewriting the entire agent.
+
+---
+
+## Debugging
+
+When something goes wrong, check the generated files in:
+
+```text
+convo_history/
+```
+
+Each run creates a timestamped Markdown file containing the task and interaction data returned by Gemini.
+
+This is often the easiest way to determine whether a failure came from:
+
+* The model's decision
+* An unexpected screen state
+* An unsupported action
+* The execution layer
+* The interaction loop
+
+---
+
+## Roadmap
+
+Handoff is currently a prototype, so the architecture is expected to evolve.
+
+Potential future work includes:
+
+* Cross-platform computer control
+* More robust safety mechanisms
+* Better error recovery
+* Improved state handling
+* More execution primitives
+* Better observability and debugging
+* More reliable long-running task execution
+
+---

@@ -5,6 +5,7 @@ managing the interaction loop, function dispatch, and screenshot capture
 for desktop automation tasks.
 """
 
+from datetime import datetime
 import os, json, winsound
 from dotenv import load_dotenv
 
@@ -17,17 +18,8 @@ from pprint import pprint
 # ============================================================================
 # CONFIGURATION: API Key & Client Setup
 # ============================================================================
-# Load the API key from the local .env file.
-load_dotenv()
-api_key = os.getenv("GEMINI_API_KEY", "")
-if not api_key:
-    raise RuntimeError(
-        "GEMINI_API_KEY is not set. Export it in your shell before launching "
-        "Jupyter, or set it here for local testing only (do not commit a real key)."
-    )
-
-# Initialize Gemini API client
-client = genai.Client(api_key=api_key)
+# Initialized by main() before the command-line workflow starts.
+client = None
 
 
 # ============================================================================
@@ -79,7 +71,7 @@ def input_blocks(text=None, image=False, function_result=None) -> list:
 # Tracks the conversation ID for multi-turn interactions (maintains context)
 previous_interaction_id = None
 
-def get_interaction(text=None, image=False, model="gemini-3.5-flash-lite", function_result=None):
+def get_interaction(text=None, image=False, model="gemini-3.5-flash-lite", function_result=None, previous_interaction_id=previous_interaction_id):
     """Send a request to the Gemini API and get back the next interaction step(s).
     
     This is the core loop: send input (text + screenshot + prior results),
@@ -95,8 +87,7 @@ def get_interaction(text=None, image=False, model="gemini-3.5-flash-lite", funct
     Returns:
         tuple: (interaction object, interaction_id) for tracking conversation.
     """
-    global previous_interaction_id  # Update global state for next turn
-    
+
     interaction = client.interactions.create(
         model=model,
         input=input_blocks(text=text, image=image, function_result=function_result),
@@ -157,109 +148,103 @@ DISPATCH = {
 
 
 
-# ============================================================================
-# TASK & INITIALIZATION
-# ============================================================================
+def main():
+    """Run the interactive desktop automation workflow."""
+    global client
 
-# Get task from user input
-task_assigned = input("Enter the task you want to assign to the model: ")
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not set. Export it in your shell before launching "
+            "Jupyter, or set it here for local testing only (do not commit a real key)."
+        )
 
-with open(history_path := "./convo_history/chat1.md", "w", encoding="utf-8") as f:
-    f.write("# Chat History Log\n\n")
-    f.write(f"Task assigned: {task_assigned}\n\n")
-    f.write("=============================================================================\n\n")
+    client = genai.Client(api_key=api_key)
+    task_assigned = input("Enter the task you want to assign to the model: ")
 
-# Brief pause before starting automation
-sleep(5)
+    with open(history_path := f"./convo_history/chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md", "w", encoding="utf-8") as f:
+        f.write("# Chat History Log\n\n")
+        f.write(f"Task assigned: {task_assigned}\n\n")
+        f.write("=============================================================================\n\n")
 
-end_interaction = False
+    sleep(5)
+    end_interaction = False
 
-# Send initial task to model with screenshot
-try:
-    interaction, previous_interaction_id = get_interaction(text=task_assigned, image=True)
-except Exception as e:
-    print(f"An error occurred while getting the initial interaction: {e}")
-    # Alert user of error with identifiable beep pattern
-    beep_alert_error()  
+    try:
+        interaction, previous_interaction_id = get_interaction(text=task_assigned, image=True)
+    except Exception as e:
+        print(f"An error occurred while getting the initial interaction: {e}")
+        beep_alert_error()
+        return
 
-chat_iteration = 0  # Track number of iterations for logging/debugging
+    chat_iteration = 0
 
-try:
-    # ============================================================================
-    # MAIN INTERACTION LOOP
-    # ============================================================================
-    while True:
-        # Prepare for next iteration
-        text = None
-        
-        chat_iteration += 1
-        # Log the entire interaction to file for debugging/auditing
-        with open(history_path, "a", encoding="utf-8") as f:
-            f.write(f"## Interaction {chat_iteration}\n\n")
-            f.write("```json\n")
-            f.write(json.dumps(interaction.model_dump(), indent=2))
-            f.write("\n```\n---\n\n")
+    try:
+        while True:
+            text = None
+            chat_iteration += 1
+            with open(history_path, "a", encoding="utf-8") as f:
+                f.write(f"## Interaction {chat_iteration}\n\n")
+                f.write("```json\n")
+                f.write(json.dumps(interaction.model_dump(), indent=2))
+                f.write("\n```\n---\n\n")
 
-        # Process each step returned by the model
-        for i, step in enumerate(interaction.steps):
-            if step.type == "function_call":
-                # Model requested an automation action (click, type, scroll, etc.)
-                func = DISPATCH.get(step.name)
-                if func:
-                    # Execute the function and capture any return value
-                    result = func(step.arguments)
-                    if result:
-                        print(f"Function call {step.name} returned: {result}")
-                        
-                        if result == "end_of_interaction":
-                            # Model signaled task completion
-                            print("=============================================")
-                            print("Ending interaction as requested by the model.")
-                            print("=============================================")
-                            # Identifiable beep pattern to signal task end/transition
-                            beep_task_end_or_next()
+            # Process each step returned by the model
+            for i, step in enumerate(interaction.steps):
+                if step.type == "function_call":
+                    # Model requested an automation action (click, type, scroll, etc.)
+                    func = DISPATCH.get(step.name)
+                    if func:
+                        # Execute the function and capture any return value
+                        result = func(step.arguments)
+                        if result:
+                            print(f"Function call {step.name} returned: {result}")
                             
-                            # Prompt user to continue or exit
-                            if bool(next_text := input("Enter text to continue the interaction (or leave blank to end): ").strip()):
-                                text = next_text
-                                sleep(2)
-                            else:
-                                end_interaction = True
-                        elif result == "Denied by user.":
-                            # User blocked a safety-gated action; report back to model
-                            text = result
-                        elif result[0:7] == "Blocked:":
-                            # Action was blocked by safety gate; report reason to model
-                            text = result
-                else:
-                    # Unknown function name - likely a typo or missing handler in DISPATCH
-                    print(f"Unknown function call: {step.name}")
-                    
-            elif step.type == "model_output":
-                # Model generated text output (thinking, explanations, etc.)
-                print(f"Model output:")
-                pprint(step.content)
-                print()
+                            if result == "end_of_interaction":
+                                # Model signaled task completion
+                                print("=============================================")
+                                print("Ending interaction as requested by the model.")
+                                print("=============================================")
+                                # Identifiable beep pattern to signal task end/transition
+                                beep_task_end_or_next()
+                                
+                                # Prompt user to continue or exit
+                                if bool(next_text := input("Enter text to continue the interaction (or leave blank to end): ").strip()):
+                                    text = next_text
+                                    sleep(2)
+                                else:
+                                    end_interaction = True
+                            elif result == "Denied by user.":
+                                # User blocked a safety-gated action; report back to model
+                                text = result
+                            elif result[0:7] == "Blocked:":
+                                # Action was blocked by safety gate; report reason to model
+                                text = result
+                    else:
+                        # Unknown function name - likely a typo or missing handler in DISPATCH
+                        print(f"Unknown function call: {step.name}")
+                        
+                elif step.type == "model_output":
+                    # Model generated text output (thinking, explanations, etc.)
+                    print(f"Model output:")
+                    pprint(step.content)
+                    print()
 
-        # Display model's response text summary
-        print(f"Interaction output: {interaction.output_text}")
-        print("\n==============================================\n")
+            print(f"Interaction output: {interaction.output_text}")
+            print("\n==============================================\n")
+            if end_interaction:
+                break
 
-        # Check if user requested to end the interaction
-        if end_interaction:
-            break
+            beep_iteration_complete()
+            sleep(1.5)
+            interaction, previous_interaction_id = get_interaction(text=text, image=True)
 
-        # Identifiable beep pattern to indicate one iteration complete
-        beep_iteration_complete()
-        sleep(1.5)
+    except Exception as e:
+        print(f"An error occurred during the interaction loop: {e}")
+        beep_alert_error()
 
-        # Request next set of steps from the model
-        interaction, previous_interaction_id = get_interaction(text=text, image=True)
 
-except Exception as e:
-    # Error handler for unexpected issues during the main loop
-    print(f"An error occurred during the interaction loop: {e}")
-    # Alert user of error with identifiable beep pattern
-    beep_alert_error()      
+if __name__ == "__main__":
+    main()
 
-    
