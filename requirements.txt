@@ -1,0 +1,4 @@
+google-genai
+keyboard
+PyAutoGUI
+python-dotenv
