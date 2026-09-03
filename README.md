@@ -25,6 +25,7 @@ The checked-in `requirements.txt` is a pip freeze from the development environme
 Run these commands from the project directory in PowerShell:
 
 ```powershell
+git clone https://github.com/Tahsin2155/handoff.git
 python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install -r requirements.txt
@@ -42,11 +43,6 @@ Create a `.env` file in the project root. The file is ignored by Git and must ne
 GEMINI_API_KEY=your-gemini-api-key
 ```
 
-Create the history directory before the first run. `main.py` writes to this path but does not create it automatically:
-
-```powershell
-New-Item -ItemType Directory -Force .\convo_history
-```
 
 ## Running Handoff
 
