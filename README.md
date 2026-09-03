@@ -25,6 +25,7 @@ The checked-in `requirements.txt` is a pip freeze from the development environme
 Run these commands from the project directory in PowerShell:
 
 ```powershell
+git clone https://github.com/Tahsin2155/handoff.git
 python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install -r requirements.txt
@@ -42,11 +43,6 @@ Create a `.env` file in the project root. The file is ignored by Git and must ne
 GEMINI_API_KEY=your-gemini-api-key
 ```
 
-Create the history directory before the first run. `main.py` writes to this path but does not create it automatically:
-
-```powershell
-New-Item -ItemType Directory -Force .\convo_history
-```
 
 ## Running Handoff
 
@@ -170,9 +166,6 @@ At startup, `main.py` overwrites `convo_history/chat1.md` with the task text. Ea
 
 The current implementation always uses the filename `chat1.md`; starting a new run replaces the previous log.
 
-## Notebook status
-
-`test.ipynb` is currently an empty Jupyter notebook with a `.venv (3.12.10)` kernel metadata entry. It is not part of the executable workflow and contains no tests or examples yet.
 
 ## Troubleshooting
 
@@ -180,13 +173,6 @@ The current implementation always uses the filename `chat1.md`; starting a new r
 
 Confirm that `.env` is in the same directory from which `main.py` is launched and contains `GEMINI_API_KEY=...`. Do not put quotes around the variable unless they are intended to be part of the value.
 
-### `FileNotFoundError` for `convo_history/chat1.md`
-
-Create the directory from the project root:
-
-```powershell
-New-Item -ItemType Directory -Force .\convo_history
-```
 
 ### PyAutoGUI acts on the wrong location
 
