@@ -11,7 +11,7 @@ The agent sends the current screen to a Gemini computer-use-supported model, rec
 The goal is simple: **let an AI interact with a computer the way a human does.**
 
 > **Status:** Prototype
-> **Platform:** Windows
+> **Platform:** Windows (primary, tested); other platforms untested
 > **Model:** Gemini models supporting computer use through the Interactions API
 
 ---
@@ -92,26 +92,25 @@ Handoff captures the current display as a PNG, keeps it in memory, and encodes i
 
 Certain actions can require explicit human approval before they are executed.
 
-When Gemini requests confirmation:
+When Gemini requests confirmation, a Yes/No dialog appears:
 
-* **Shift** → approve the action
-* **Ctrl** → deny the action
+* **Yes** → approve the action
+* **No / close** → deny the action
 
 Actions explicitly marked as blocked by the safety decision are rejected automatically.
 
 The safety layer is implemented as a central gate before computer actions are executed.
 
-### Audible feedback
+### Dialog-based notifications
 
-Handoff uses different beep patterns to communicate important events, including:
+Handoff uses Tk dialogs (cross-platform) to communicate and ask for input:
 
-* Errors
-* Iteration completion
-* Task completion / transition
-* Confirmation requests
-* Blocked actions
+* Task entry and "continue / end" prompts
+* Confirmation requests (Yes/No)
+* Blocked actions (warning dialog with the reason)
+* Errors (error dialog)
 
-This makes important events noticeable even when the user is not watching the terminal.
+A system bell rings after each completed iteration.
 
 ### Conversation logging
 
@@ -128,7 +127,7 @@ The log contains the assigned task and the model interactions returned during ex
 
 ## Requirements
 
-Handoff currently runs on **Windows**.
+Handoff is developed and tested on **Windows**.
 
 You need:
 
@@ -182,11 +181,11 @@ A computer-use action may include a `safety_decision`. The execution layer check
 
 ### Confirmation required
 
-When an action requires confirmation, Handoff emits an audible alert and waits for a key press.
+When an action requires confirmation, Handoff shows a Yes/No dialog.
 
 ```text
-Shift → Approve
-Ctrl  → Deny
+Yes → Approve
+No  → Deny
 ```
 
 ### Blocked action
@@ -241,7 +240,7 @@ It contains functions for:
 * Capturing the screen
 * Encoding screenshots as Base64
 * Loading existing images
-* Producing audible status signals
+* Showing dialogs for input, confirmations and notifications
 
 The screenshot capture uses PyAutoGUI and writes the PNG into an in-memory buffer rather than creating a temporary screenshot file.
 
@@ -321,11 +320,9 @@ The model is passed when creating an interaction, so the configured model can be
 
 Handoff is still a prototype.
 
-### Windows only
+### Tested on Windows only
 
-The current implementation relies on Windows-specific functionality such as Python's `winsound` module, so it is not currently portable to macOS or Linux.
-
-There is future scope for replacing the platform-specific pieces with cross-platform implementations.
+The Windows-only `winsound` dependency has been removed, so the code should no longer fail to import on macOS or Linux, but it has not been tested there. Platform differences in PyAutoGUI (e.g. macOS accessibility permissions, Linux/X11 vs Wayland screenshots), scroll behavior and key names may still need work.
 
 ### Screen-level automation
 
@@ -341,7 +338,7 @@ That makes the system flexible, but also means performance depends on factors su
 
 ### Prototype safety model
 
-The current confirmation mechanism is intentionally simple: the user can approve or deny a gated action through global keyboard input.
+The current confirmation mechanism is intentionally simple: the user can approve or deny a gated action through a Yes/No dialog.
 
 It should be treated as a prototype safety mechanism rather than a complete security boundary.
 

@@ -5,15 +5,17 @@ managing the interaction loop, function dispatch, and screenshot capture
 for desktop automation tasks.
 """
 
+import json
+import os
 from datetime import datetime
-import os, json, winsound
+from time import sleep
+from pprint import pprint
+
 from dotenv import load_dotenv
 
 from google import genai
-# Import automation functions and beep utilities
-from executions import hands, screen_cap, get_img, beep_iteration_complete, beep_task_end_or_next, beep_alert_error
-from time import sleep
-from pprint import pprint
+from executions import hands, sys_instructions, screen_cap, prompt_user_input, error_message_box, bell
+from executions.tools import TOOLS, RETURN_CONTROL
 
 # ============================================================================
 # CONFIGURATION: API Key & Client Setup
@@ -25,7 +27,7 @@ client = None
 # ============================================================================
 # INPUT BLOCK CONSTRUCTION
 # ============================================================================
-def input_blocks(text=None, image=False, function_result=None) -> list:
+def input_blocks(text=None, image=False) -> list:
     """Build a list of input content blocks for the Gemini API.
     
     Each block represents a piece of input data: text instruction, screenshot,
@@ -56,13 +58,6 @@ def input_blocks(text=None, image=False, function_result=None) -> list:
                 "mime_type": "image/png"
             }
         )
-    if function_result:
-        input_block.append(
-            {
-                "type": "function_result",
-                "data": function_result  # Report execution result back to model
-            }
-        )
     return input_block
 
 # ============================================================================
@@ -71,7 +66,7 @@ def input_blocks(text=None, image=False, function_result=None) -> list:
 # Tracks the conversation ID for multi-turn interactions (maintains context)
 previous_interaction_id = None
 
-def get_interaction(text=None, image=False, model="gemini-3.5-flash-lite", function_result=None, previous_interaction_id=previous_interaction_id):
+def get_interaction(text=None, image=False, model="gemini-3.8-flash"):
     """Send a request to the Gemini API and get back the next interaction step(s).
     
     This is the core loop: send input (text + screenshot + prior results),
@@ -87,26 +82,17 @@ def get_interaction(text=None, image=False, model="gemini-3.5-flash-lite", funct
     Returns:
         tuple: (interaction object, interaction_id) for tracking conversation.
     """
+    global previous_interaction_id
 
     interaction = client.interactions.create(
         model=model,
-        input=input_blocks(text=text, image=image, function_result=function_result),
-        tools=[
-            {
-                # Computer-use tool: allows model to control mouse, keyboard, see screen
-                "type": "computer_use",
-                "environment": "desktop"
-            },
-            {
-                # Custom function: model can signal when task is done
-                "type": "function",
-                "name": "end_of_interaction",
-                "description": "Request to end the current interaction. Use this when the task is complete and no further actions are needed, stuck somewhere, or when the model is unable to proceed. This will stop the interaction and return control to the user."
-            }
-        ],
-        previous_interaction_id=previous_interaction_id  # Link to prior message for context
+        input=input_blocks(text=text, image=image),
+        tools=TOOLS,
+        previous_interaction_id=previous_interaction_id,  # Link to prior message for context
+        system_instruction=sys_instructions
     )
-    return interaction, interaction.id
+    previous_interaction_id = interaction.id  # Update for next call
+    return interaction
 
 
 
@@ -130,7 +116,7 @@ DISPATCH = {
     "move": lambda kwargs: hands.move(**kwargs),
     
     # Keyboard & text input
-    "type": lambda kwargs: hands.type(**kwargs),
+    "type": lambda kwargs: hands.types(**kwargs),
     "press_key": lambda kwargs: hands.press_key(**kwargs),
     "key_down": lambda kwargs: hands.key_down(**kwargs),
     "key_up": lambda kwargs: hands.key_up(**kwargs),
@@ -143,7 +129,7 @@ DISPATCH = {
     
     # Vision & control flow
     "take_screenshot": lambda kwargs: screen_cap(**kwargs),
-    "end_of_interaction": lambda kwargs=None: "end_of_interaction"  # Signal end of task
+    "return_control": lambda kwargs=None: "return_control"
 }
 
 
@@ -156,26 +142,31 @@ def main():
     api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
         raise RuntimeError(
-            "GEMINI_API_KEY is not set. Export it in your shell before launching "
-            "Jupyter, or set it here for local testing only (do not commit a real key)."
+            "GEMINI_API_KEY is not set. Add it to a .env file in the project root."
         )
 
     client = genai.Client(api_key=api_key)
-    task_assigned = input("Enter the task you want to assign to the model: ")
+    task_assigned = prompt_user_input("Enter the task you want to assign to the model:", title="Handoff: New Task")
+    if not task_assigned or not task_assigned.strip():
+        print("No task entered. Exiting.")
+        return
 
-    with open(history_path := f"./convo_history/chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md", "w", encoding="utf-8") as f:
+    os.makedirs("convo_history", exist_ok=True)
+    history_path = f"./convo_history/chat_{datetime.now():%Y%m%d_%H%M%S}.md"
+    with open(history_path, "w", encoding="utf-8") as f:
         f.write("# Chat History Log\n\n")
         f.write(f"Task assigned: {task_assigned}\n\n")
         f.write("=============================================================================\n\n")
 
     sleep(5)
+    bell()
     end_interaction = False
 
     try:
-        interaction, previous_interaction_id = get_interaction(text=task_assigned, image=True)
+        interaction = get_interaction(text=task_assigned, image=True)
     except Exception as e:
         print(f"An error occurred while getting the initial interaction: {e}")
-        beep_alert_error()
+        error_message_box(f"An error occurred while getting the initial interaction:\n\n{e}", title="Handoff: Error")
         return
 
     chat_iteration = 0
@@ -190,6 +181,9 @@ def main():
                 f.write(json.dumps(interaction.model_dump(), indent=2))
                 f.write("\n```\n---\n\n")
 
+            print(f"Interaction output: {interaction.output_text}")
+            print("==============================================\n")
+
             # Process each step returned by the model
             for i, step in enumerate(interaction.steps):
                 if step.type == "function_call":
@@ -201,16 +195,13 @@ def main():
                         if result:
                             print(f"Function call {step.name} returned: {result}")
                             
-                            if result == "end_of_interaction":
+                            if result == "return_control":
                                 # Model signaled task completion
                                 print("=============================================")
                                 print("Ending interaction as requested by the model.")
                                 print("=============================================")
-                                # Identifiable beep pattern to signal task end/transition
-                                beep_task_end_or_next()
-                                
                                 # Prompt user to continue or exit
-                                if bool(next_text := input("Enter text to continue the interaction (or leave blank to end): ").strip()):
+                                if bool(next_text := (prompt_user_input("Enter text to continue the interaction (leave blank or cancel to end):", title="Handoff: Continue?") or "").strip()):
                                     text = next_text
                                     sleep(2)
                                 else:
@@ -218,31 +209,25 @@ def main():
                             elif result == "Denied by user.":
                                 # User blocked a safety-gated action; report back to model
                                 text = result
-                            elif result[0:7] == "Blocked:":
+                            elif result.startswith("Blocked:"):
                                 # Action was blocked by safety gate; report reason to model
                                 text = result
                     else:
                         # Unknown function name - likely a typo or missing handler in DISPATCH
                         print(f"Unknown function call: {step.name}")
                         
-                elif step.type == "model_output":
-                    # Model generated text output (thinking, explanations, etc.)
-                    print(f"Model output:")
-                    pprint(step.content)
-                    print()
 
-            print(f"Interaction output: {interaction.output_text}")
             print("\n==============================================\n")
             if end_interaction:
                 break
 
-            beep_iteration_complete()
+            bell()
             sleep(1.5)
-            interaction, previous_interaction_id = get_interaction(text=text, image=True)
+            interaction = get_interaction(text=text, image=True)
 
     except Exception as e:
         print(f"An error occurred during the interaction loop: {e}")
-        beep_alert_error()
+        error_message_box(f"An error occurred during the interaction loop:\n\n{e}", title="Handoff: Error")
 
 
 if __name__ == "__main__":
