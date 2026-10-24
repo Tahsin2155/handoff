@@ -9,19 +9,21 @@ import json
 import os
 from datetime import datetime
 from time import sleep
-from pprint import pprint
 
 from dotenv import load_dotenv
 
 from google import genai
 from executions import hands, sys_instructions, screen_cap, prompt_user_input, error_message_box, bell
-from executions.tools import TOOLS, RETURN_CONTROL
+from executions.results import OK, Outcome, Result
+from executions.tools import ACTION_GAP_SECONDS, HANDLERS, MAX_ACTIONS_PER_TURN, TOOLS
 
 # ============================================================================
 # CONFIGURATION: API Key & Client Setup
 # ============================================================================
 # Initialized by main() before the command-line workflow starts.
 client = None
+
+from config import MODEL, THINKING_LVL, PREVIOUS_INTERACTION_ID
 
 
 # ============================================================================
@@ -64,9 +66,9 @@ def input_blocks(text=None, image=False) -> list:
 # INTERACTION STATE & API CALLS
 # ============================================================================
 # Tracks the conversation ID for multi-turn interactions (maintains context)
-previous_interaction_id = None
+previous_interaction_id = PREVIOUS_INTERACTION_ID
 
-def get_interaction(text=None, image=False, model="gemini-3.8-flash"):
+def get_interaction(text=None, image=False):
     """Send a request to the Gemini API and get back the next interaction step(s).
     
     This is the core loop: send input (text + screenshot + prior results),
@@ -85,11 +87,15 @@ def get_interaction(text=None, image=False, model="gemini-3.8-flash"):
     global previous_interaction_id
 
     interaction = client.interactions.create(
-        model=model,
+        model=MODEL,
         input=input_blocks(text=text, image=image),
         tools=TOOLS,
         previous_interaction_id=previous_interaction_id,  # Link to prior message for context
-        system_instruction=sys_instructions
+        system_instruction=sys_instructions,
+        generation_config={
+            "thinking_level": THINKING_LVL,
+            "thinking_summaries": "auto"
+        }
     )
     previous_interaction_id = interaction.id  # Update for next call
     return interaction
@@ -99,6 +105,12 @@ def get_interaction(text=None, image=False, model="gemini-3.8-flash"):
 # ============================================================================
 # FUNCTION DISPATCH TABLE
 # ============================================================================
+# Every handler takes the model's arguments dict and returns a Result.
+def _take_screenshot(kwargs):
+    screen_cap(**kwargs)  # the model already gets a fresh screenshot every turn
+    return OK
+
+
 # Maps function names from Gemini API to executable functions in exe_func module.
 # When the model requests an action (e.g., "click at x=500, y=300"), this table
 # routes it to the correct handler function.
@@ -128,9 +140,56 @@ DISPATCH = {
     "wait": lambda kwargs: hands.wait(**kwargs),
     
     # Vision & control flow
-    "take_screenshot": lambda kwargs: screen_cap(**kwargs),
-    "return_control": lambda kwargs=None: "return_control"
+    "take_screenshot": _take_screenshot,
+
+    # Tools Handoff implements itself (return_control, ...), see tools.py
+    **HANDLERS,
 }
+
+
+def run_turn(steps, max_actions=MAX_ACTIONS_PER_TURN, gap=ACTION_GAP_SECONDS):
+    """Execute the model's function calls in order, stopping early when needed.
+
+    The model may batch several calls in one turn. They run one after another
+    with a short pause between them; a denied/blocked/unknown/return_control
+    result stops the rest, and calls beyond `max_actions` are not executed.
+
+    Returns (feedback, stopped_by):
+      feedback   - lines to send back to the model on the next turn
+      stopped_by - the Result that ended the turn early, or None
+    """
+    calls = [step for step in steps if step.type == "function_call"]
+    feedback = []
+    for i, step in enumerate(calls):
+        if i >= max_actions:
+            feedback.append(
+                f"Not executed because only {max_actions} actions run per turn: "
+                + ", ".join(call.name for call in calls[i:])
+            )
+            return feedback, None
+        if i > 0:
+            sleep(gap)  # let the UI react to the previous action
+
+        func = DISPATCH.get(step.name)
+        if func is None:
+            result = Result(
+                Outcome.UNKNOWN_FUNCTION,
+                f"No function named '{step.name}' exists, so it was not executed.",
+            )
+        else:
+            result = func(step.arguments)
+
+        if result.outcome is not Outcome.OK:
+            print(f"[{step.name}] {result.outcome.value}" + (f": {result.message}" if result.message else ""))
+        if result.message:
+            feedback.append(f"{step.name}: {result.message}")
+
+        if result.stops_turn:
+            skipped = [call.name for call in calls[i + 1:]]
+            if skipped:
+                feedback.append("Not executed because the turn stopped early: " + ", ".join(skipped))
+            return feedback, result
+    return feedback, None
 
 
 
@@ -160,7 +219,6 @@ def main():
 
     sleep(5)
     bell()
-    end_interaction = False
 
     try:
         interaction = get_interaction(text=task_assigned, image=True)
@@ -173,7 +231,6 @@ def main():
 
     try:
         while True:
-            text = None
             chat_iteration += 1
             with open(history_path, "a", encoding="utf-8") as f:
                 f.write(f"## Interaction {chat_iteration}\n\n")
@@ -184,43 +241,19 @@ def main():
             print(f"Interaction output: {interaction.output_text}")
             print("==============================================\n")
 
-            # Process each step returned by the model
-            for i, step in enumerate(interaction.steps):
-                if step.type == "function_call":
-                    # Model requested an automation action (click, type, scroll, etc.)
-                    func = DISPATCH.get(step.name)
-                    if func:
-                        # Execute the function and capture any return value
-                        result = func(step.arguments)
-                        if result:
-                            print(f"Function call {step.name} returned: {result}")
-                            
-                            if result == "return_control":
-                                # Model signaled task completion
-                                print("=============================================")
-                                print("Ending interaction as requested by the model.")
-                                print("=============================================")
-                                # Prompt user to continue or exit
-                                if bool(next_text := (prompt_user_input("Enter text to continue the interaction (leave blank or cancel to end):", title="Handoff: Continue?") or "").strip()):
-                                    text = next_text
-                                    sleep(2)
-                                else:
-                                    end_interaction = True
-                            elif result == "Denied by user.":
-                                # User blocked a safety-gated action; report back to model
-                                text = result
-                            elif result.startswith("Blocked:"):
-                                # Action was blocked by safety gate; report reason to model
-                                text = result
-                    else:
-                        # Unknown function name - likely a typo or missing handler in DISPATCH
-                        print(f"Unknown function call: {step.name}")
-                        
+            # Run the model's actions (possibly a batch). A denied/blocked/unknown/
+            # return_control step stops the rest of the turn.
+            feedback, stopped_by = run_turn(interaction.steps)
+
+            if stopped_by is not None:
+                if stopped_by.outcome is Outcome.END_RUN:
+                    break  # the user ended the run in the return_control dialog
+                if stopped_by.outcome is Outcome.RETURN_CONTROL:
+                    sleep(2)  # let the dialog close and the screen settle
+
+            text = "\n".join(feedback) or None
 
             print("\n==============================================\n")
-            if end_interaction:
-                break
-
             bell()
             sleep(1.5)
             interaction = get_interaction(text=text, image=True)

@@ -2,9 +2,10 @@
 Execution layer ("hands"): turns the model's normalized (0-999) coordinates and
 function-call args into real mouse/keyboard actions via pyautogui.
 
-Every action goes through @gated. If the model attached a `safety_decision`,
-the gate runs first; a blocked/denied action returns a message string instead
-of executing. A normal action returns None.
+Every action goes through @gated and returns a `Result` (see results.py).
+If the model attached a `safety_decision`, the gate runs first; a blocked or
+denied action returns a DENIED/BLOCKED result instead of executing. An action
+that ran returns OK.
 """
 from functools import wraps
 from time import sleep
@@ -12,6 +13,7 @@ from time import sleep
 import pyautogui
 
 from .dialogs import prompt_user_confirmation, warning_message_box
+from .results import OK, Outcome, Result
 
 WIDTH, HEIGHT = pyautogui.size()
 _NORM_MAX = 999
@@ -22,8 +24,8 @@ def denormalize_coordinates(x, y):
     return x / _NORM_MAX * WIDTH, y / _NORM_MAX * HEIGHT
 
 
-def needs_gate(safety_decision: dict) -> str | None:
-    """Return a reason string if the action must NOT run, else None."""
+def needs_gate(safety_decision: dict) -> Result | None:
+    """Return a DENIED/BLOCKED Result if the action must NOT run, else None."""
     decision = safety_decision.get("decision")
     explanation = safety_decision.get("explanation", "No explanation provided")
     print(f"[Safety] {explanation}")
@@ -37,23 +39,28 @@ def needs_gate(safety_decision: dict) -> str | None:
             print("[Safety] Approved by user.")
             return None
         print("[Safety] Denied by user.")
-        return "Denied by user."
+        return Result(Outcome.DENIED, "Denied by user.")
 
     if decision == "blocked":
         print(f"[Safety] Blocked: {explanation}")
         warning_message_box(explanation, title="Handoff: Action Blocked")
-        return f"Blocked: {explanation}"
+        return Result(Outcome.BLOCKED, f"Blocked: {explanation}")
 
     return None
 
 
 def gated(action):
-    """Run the safety gate before `action`; skip the action if it says no."""
+    """Run the safety gate before `action`; skip the action if it says no.
+
+    The wrapped function returns a Result: the gate's DENIED/BLOCKED result, or
+    OK once the action has run.
+    """
     @wraps(action)
     def wrapper(*args, safety_decision=None, **kwargs):
-        if safety_decision and (reason := needs_gate(safety_decision)):
-            return reason
-        return action(*args, **kwargs)
+        if safety_decision and (refusal := needs_gate(safety_decision)):
+            return refusal
+        action(*args, **kwargs)
+        return OK
     return wrapper
 
 
