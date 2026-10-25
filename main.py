@@ -1,8 +1,10 @@
-"""Gemini Computer-Use Agent: Main orchestration module.
+"""Handoff: main orchestration module.
 
-This module coordinates the Gemini API client with the computer-use tool,
-managing the interaction loop, function dispatch, and screenshot capture
-for desktop automation tasks.
+Runs the see -> decide -> act -> see-again loop: sends the task and a
+screenshot to Gemini (Interactions API), executes the function calls the model
+returns through the dispatch table and `run_turn`, then sends the new
+screenshot and any feedback back. Also writes the per-run log to
+convo_history/.
 """
 
 import json
@@ -18,9 +20,9 @@ from executions.results import OK, Outcome, Result
 from executions.tools import ACTION_GAP_SECONDS, HANDLERS, MAX_ACTIONS_PER_TURN, TOOLS
 
 # ============================================================================
-# CONFIGURATION: API Key & Client Setup
+# CLIENT & CONFIGURATION
 # ============================================================================
-# Initialized by main() before the command-line workflow starts.
+# The Gemini client; created in main() once the API key has been loaded.
 client = None
 
 from config import MODEL, THINKING_LVL, PREVIOUS_INTERACTION_ID
@@ -30,19 +32,16 @@ from config import MODEL, THINKING_LVL, PREVIOUS_INTERACTION_ID
 # INPUT BLOCK CONSTRUCTION
 # ============================================================================
 def input_blocks(text=None, image=False) -> list:
-    """Build a list of input content blocks for the Gemini API.
-    
-    Each block represents a piece of input data: text instruction, screenshot,
-    or result from a previous function call. The model uses these to make
-    decisions about which automation action to take next.
-    
+    """Build the input content blocks for one Gemini request.
+
     Args:
-        text (str, optional): Text instruction or prompt for the model.
-        image (bool, optional): If True, capture current screen and include as image.
-        function_result (dict, optional): Result from a previous function execution.
-    
+        text (str, optional): Text for the model: the task, or feedback about
+            the previous turn (denied/blocked/skipped actions, user replies).
+        image (bool, optional): If True, capture the screen now and add it as a
+            base64 PNG image block.
+
     Returns:
-        list: List of content blocks ready to send to Gemini API.
+        list: Content blocks (text first, then image) for the `input` field.
     """
     input_block = []
     if text:
@@ -65,24 +64,26 @@ def input_blocks(text=None, image=False) -> list:
 # ============================================================================
 # INTERACTION STATE & API CALLS
 # ============================================================================
-# Tracks the conversation ID for multi-turn interactions (maintains context)
+# ID of the latest interaction. Sent with each request so Gemini keeps the
+# earlier turns as context. Starts from config.PREVIOUS_INTERACTION_ID (None
+# for a fresh conversation) and is updated by get_interaction().
 previous_interaction_id = PREVIOUS_INTERACTION_ID
 
 def get_interaction(text=None, image=False):
-    """Send a request to the Gemini API and get back the next interaction step(s).
-    
-    This is the core loop: send input (text + screenshot + prior results),
-    and receive back a list of steps the model wants to execute (function calls
-    or text output).
-    
+    """Send one request to Gemini and return the resulting interaction.
+
+    Uses MODEL and THINKING_LVL from config.py, the tools and system
+    instruction from `executions`, and links the request to the previous
+    interaction. Afterwards the module-level `previous_interaction_id` points
+    at the returned interaction. Exceptions from the API call propagate.
+
     Args:
-        text (str, optional): Task instruction or continuation text.
-        image (bool, optional): Include current screenshot in request.
-        model (str): Which Gemini model to use.
-        function_result (dict, optional): Result from previous function execution.
-    
+        text (str, optional): The task, or feedback text for this turn.
+        image (bool, optional): Include a fresh screenshot in the request.
+
     Returns:
-        tuple: (interaction object, interaction_id) for tracking conversation.
+        The interaction object. `.steps` holds the model's output (text and
+        function calls), `.output_text` its text, `.id` its ID.
     """
     global previous_interaction_id
 
@@ -111,9 +112,9 @@ def _take_screenshot(kwargs):
     return OK
 
 
-# Maps function names from Gemini API to executable functions in exe_func module.
-# When the model requests an action (e.g., "click at x=500, y=300"), this table
-# routes it to the correct handler function.
+# Maps the function names the model can call to handlers. Each handler takes
+# the model's arguments dict and returns a Result. Mouse/keyboard actions come
+# from hands.py (gated by the safety check); see tools.py for HANDLERS.
 DISPATCH = {
     # Mouse click operations
     "click": lambda kwargs: hands.click(**kwargs),

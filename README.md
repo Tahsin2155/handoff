@@ -1,149 +1,56 @@
 # Handoff
 
-**Handoff** is a prototype AI computer-use agent that lets you control a computer using natural-language instructions.
-
-You give Handoff a task such as:
+Handoff is a prototype AI agent that operates your desktop for you. You give it a task in plain English; it looks at the screen, decides what to do, and does it with the mouse and keyboard.
 
 > "Open the browser, search for the latest Python release, and save the result."
 
-The agent sends the current screen to a Gemini computer-use-supported model, receives the next actions to perform, and executes them using the mouse and keyboard.
+It uses a Gemini model through the **Interactions API** with the built-in `computer_use` tool (desktop environment). The model never sees pixel coordinates; it works in a normalized 0-999 space that Handoff converts to your real screen resolution.
 
-The goal is simple: **let an AI interact with a computer the way a human does.**
-
-> **Status:** Prototype
-> **Platform:** Windows (primary, tested); other platforms untested
-> **Model:** Gemini models supporting computer use through the Interactions API
+> **Status:** prototype
+> **Platform:** developed and tested on Windows only; no Windows-specific code remains, but other platforms are untested
+> **Model:** configurable in `config.py` (default `gemini-3.8-flash`)
 
 ---
 
-## How It Works
+## How it works
 
-Handoff operates as a continuous **see → decide → act → see again** loop.
+Handoff runs a **see → decide → act → see again** loop.
 
 ```text
-Natural-language task
-        │
-        ▼
-   Gemini API
-        │
-        │  screenshot + task
-        ▼
-  Computer-use model
-        │
-        │  action(s)
-        ▼
-   Handoff dispatcher
-        │
-        ▼
- Mouse / Keyboard
-        │
-        ▼
- Updated computer screen
-        │
-        └───────────────► Gemini
+task (Tk dialog)
+      │
+      ▼
+screenshot + text ──► Gemini ──► steps (text and/or function calls)
+      ▲                                   │
+      │                                   ▼
+      │                      run_turn: execute calls in order
+      │                       (safety gate → PyAutoGUI)
+      │                                   │
+      └──── feedback text + new screenshot ◄┘
 ```
 
-At a high level:
+1. You enter a task in a dialog.
+2. Handoff captures the screen and sends it with the task to Gemini.
+3. Gemini replies with steps. Function-call steps are actions; one turn can contain several (a batch).
+4. `run_turn` runs the actions in order, with a short pause between them. Each goes through the safety gate before it reaches PyAutoGUI.
+5. Handoff captures a new screenshot and sends it back, along with text describing anything that did not go as planned (denied, blocked, skipped actions, the user's replies).
+6. Repeat until the user ends the run.
 
-1. You provide a task in natural language.
-2. Handoff captures the current screen.
-3. The screenshot and task are sent to Gemini.
-4. Gemini decides what computer action should happen next.
-5. Handoff dispatches that action to the appropriate function.
-6. The action is performed using PyAutoGUI.
-7. The resulting screen is captured and sent back to the model.
-8. The process continues until the model ends the interaction.
+The interaction ID is carried from one request to the next, so Gemini keeps the earlier turns as context. Each turn sends only the new screenshot and feedback.
 
-Handoff maintains the Gemini interaction ID between turns so the model can continue working with the conversation context.
+The run ends only when the user leaves the `return_control` dialog blank or cancels it, or when an unhandled error occurs (see [Limitations](#limitations)). A model reply with no function calls does not end the run; Handoff just sends a fresh screenshot.
 
 ---
 
-## Features
+## Setup
 
-### Natural-language computer control
-
-Give Handoff a task instead of manually describing every individual action.
-
-### Mouse and keyboard automation
-
-The execution layer currently supports:
-
-* Click
-* Double-click
-* Triple-click
-* Left/right/middle mouse actions
-* Mouse movement
-* Mouse button down/up
-* Drag and drop
-* Scrolling
-* Typing text
-* Key presses
-* Key down/up
-* Keyboard shortcuts
-* Waiting
-
-These actions are exposed through a central dispatch table that maps Gemini function calls to local execution functions.
-
-### Screenshot-based interaction
-
-Handoff captures the current display as a PNG, keeps it in memory, and encodes it as Base64 for use in the Gemini request. It can also load an existing image from disk for reproducible testing.
-
-### Safety gate
-
-Certain actions can require explicit human approval before they are executed.
-
-When Gemini requests confirmation, a Yes/No dialog appears:
-
-* **Yes** → approve the action
-* **No / close** → deny the action
-
-Actions explicitly marked as blocked by the safety decision are rejected automatically.
-
-The safety layer is implemented as a central gate before computer actions are executed.
-
-### Dialog-based notifications
-
-Handoff uses Tk dialogs (cross-platform) to communicate and ask for input:
-
-* Task entry and "continue / end" prompts
-* Confirmation requests (Yes/No)
-* Blocked actions (warning dialog with the reason)
-* Errors (error dialog)
-
-A system bell rings after each completed iteration.
-
-### Conversation logging
-
-Each run creates a Markdown log inside `convo_history/`.
-
-The log contains the assigned task and the model interactions returned during execution. This is useful for:
-
-* Debugging
-* Understanding why the agent took a particular action
-* Reviewing failed runs
-* Inspecting the model's interaction history
-
----
-
-## Requirements
-
-Handoff is developed and tested on **Windows**.
-
-You need:
-
-* Python
-* A Gemini API key
-* The Python dependencies listed in `requirements.txt`
-
-Install the dependencies with:
+You need Python, a Gemini API key, and the packages in `requirements.txt`:
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
-
-## Setup
+`requirements.txt` lists `google-genai`, `PyAutoGUI` and `python-dotenv`. Handoff's dialogs use `tkinter`, which ships with the standard Python installer on Windows (on some Linux distributions it is a separate package).
 
 Create a `.env` file in the project root:
 
@@ -151,275 +58,207 @@ Create a `.env` file in the project root:
 GEMINI_API_KEY=your_gemini_api_key
 ```
 
-Handoff reads this value using `python-dotenv`. The application will stop at startup if `GEMINI_API_KEY` is not available.
+`main.py` stops at startup with a `RuntimeError` if `GEMINI_API_KEY` is missing.
 
----
-
-## Running Handoff
-
-From the project directory:
+## Running
 
 ```bash
 python main.py
 ```
 
-You will be prompted to enter a task:
+A dialog asks for the task. After you submit it, Handoff waits 5 seconds (so you can get the screen into the state you want), rings the system bell, and starts the loop. Leaving the task blank exits.
 
-```text
-Enter the task you want to assign to the model:
-```
-
-Enter a natural-language instruction and Handoff will begin the computer-use loop.
+Handoff controls your real mouse and keyboard while it runs. Do not use the computer at the same time.
 
 ---
 
-## Safety Controls
+## Configuration
 
-Handoff does not blindly execute every action returned by the model.
+Settings live in `config.py`:
 
-A computer-use action may include a `safety_decision`. The execution layer checks this decision before allowing the action to reach PyAutoGUI.
+| Name | Default | Meaning |
+|---|---|---|
+| `MODEL` | `"gemini-3.8-flash"` | Gemini model used for every request. |
+| `THINKING_LVL` | `"low"` | Thinking level sent as `generation_config.thinking_level`. Options noted in the file: `"low"`, `"medium"`, `"high"`. Lower is faster; higher may give better actions. |
+| `PREVIOUS_INTERACTION_ID` | `None` | If set, the first request continues that earlier Gemini interaction instead of starting fresh. |
 
-### Confirmation required
+`main.py` also always sends `thinking_summaries: "auto"`.
 
-When an action requires confirmation, Handoff shows a Yes/No dialog.
+**Continuing a previous run.** To pick up from an earlier interaction, replace `None` with that interaction's ID, as a string:
 
-```text
-Yes → Approve
-No  → Deny
+```python
+PREVIOUS_INTERACTION_ID = "your_last_interaction_id"
 ```
 
-### Blocked action
+Use the ID of the last interaction of the earlier run (the `id` field of the last entry in that run's log in `convo_history/`). The first request of the new run is linked to it, so Gemini keeps that conversation as context; Handoff still asks for a new task and sends a fresh screenshot. Set it back to `None` to start fresh.
 
-When the safety decision is `blocked`, the action is not executed and the reason is reported back to the interaction loop.
+Two per-turn limits are defined at the top of `executions/tools.py`:
 
-This allows the model and the local execution layer to participate in a safety boundary rather than giving the model unrestricted control of the machine.
+| Name | Default | Meaning |
+|---|---|---|
+| `MAX_ACTIONS_PER_TURN` | `6` | Actions beyond this in one turn are not executed; the model is told which ones were dropped. |
+| `ACTION_GAP_SECONDS` | `1` | Pause between actions of the same turn, so the UI can react. |
 
 ---
 
-## Project Structure
+## Project structure
 
 ```text
 Handoff/
-│
-├── convo_history/
-│   └── # Generated interaction logs
-│
+├── main.py                  # loop, API calls, dispatch table, run_turn
+├── config.py                # MODEL, THINKING_LVL, PREVIOUS_INTERACTION_ID
+├── requirements.txt
 ├── executions/
-│   ├── __init__.py
-│   └── hands.py
-│
-├── main.py
-├── README.md
-└── requirements.txt
+│   ├── __init__.py          # re-exports the public pieces below
+│   ├── hands.py             # mouse/keyboard actions + safety gate
+│   ├── results.py           # Outcome enum and Result dataclass
+│   ├── tools.py             # tool declarations, return_control, turn limits
+│   ├── prompts.py           # system instruction sent to the model
+│   ├── vision.py            # screenshot capture and image loading
+│   └── dialogs.py           # Tk dialogs and the system bell
+├── tests/                   # offline unit tests (see Tests)
+└── convo_history/           # per-run logs (generated)
 ```
 
 ### `main.py`
 
-The main orchestration layer.
-
-It is responsible for:
-
-* Loading configuration
-* Creating the Gemini client
-* Building API input blocks
-* Sending screenshots and instructions to Gemini
-* Maintaining interaction state
-* Receiving model outputs
-* Dispatching computer-use actions
-* Handling task completion
-* Writing conversation logs
-
-The Gemini request uses the `computer_use` tool with the `desktop` environment, along with a custom `end_of_interaction` function for ending an interaction.
-
-### `executions/__init__.py`
-
-This module provides the **vision/input side** of Handoff.
-
-It contains functions for:
-
-* Capturing the screen
-* Encoding screenshots as Base64
-* Loading existing images
-* Showing dialogs for input, confirmations and notifications
-
-The screenshot capture uses PyAutoGUI and writes the PNG into an in-memory buffer rather than creating a temporary screenshot file.
+- `input_blocks(text, image)` builds the request input: an optional text block and an optional screenshot block (`image/png`, base64).
+- `get_interaction(text, image)` calls `client.interactions.create(...)` with the model, input, tools, system instruction and generation config, passing the previous interaction ID. It stores the new interaction's ID for the next call and returns the interaction.
+- `DISPATCH` maps each function name the model can call to a handler. The handlers are the actions in `hands.py`, `take_screenshot`, and the tools Handoff implements itself (`HANDLERS` from `tools.py`).
+- `run_turn(steps, max_actions, gap)` executes one turn's function calls (see [Turns and results](#turns-and-results)).
+- `main()` loads the API key, asks for the task, creates the log file, and runs the loop.
 
 ### `executions/hands.py`
 
-This module provides the **action/execution side** of Handoff.
+The execution layer. Converts normalized coordinates to pixels and performs the action with PyAutoGUI. Every action is wrapped by `@gated` and returns a `Result`. Screen size is read once, when the module is imported.
 
-Think of it as the agent's hands.
+### `executions/results.py`
 
-It receives the normalized coordinates and arguments produced by the computer-use model and translates them into real mouse and keyboard operations through PyAutoGUI.
+Defines `Outcome` and `Result` (see below).
+
+### `executions/tools.py`
+
+Declares the tools sent to the API (`TOOLS`: `computer_use` for the desktop, plus `return_control`), implements the `return_control` handler, and holds the per-turn limits.
+
+### `executions/prompts.py`
+
+`sys_instructions`, the system prompt, built by `build_sys_instructions(system)` for the OS reported by `platform.system()` when the module is imported. The OS name tells the model what kind of desktop it is controlling, and the address-bar tip uses `Cmd` on macOS and `Ctrl` elsewhere. For an OS it does not recognise, the prompt says just "desktop". It tells the model the per-turn output format (PROGRESS / OBSERVATION / NEXT ACTION), how to batch actions, what the system's feedback messages mean, the boundaries it must respect, and how to hand control back. The turn limit and the `return_control` name are filled in from `tools.py`, so the prompt and the code cannot drift apart.
+
+### `executions/vision.py`
+
+- `screen_cap(intent=None)` captures the screen with PyAutoGUI and returns it as a base64 PNG string, held in memory (no file is written).
+- `get_img(path)` loads an image file from disk as base64 and raises clear errors for an empty path, a missing file, or a directory. It is meant for reproducible testing.
+
+### `executions/dialogs.py`
+
+Tk dialogs, all kept above other windows: `prompt_user_input`, `prompt_user_confirmation` (Yes/No), `error_message_box`, `warning_message_box`, and `bell`. A hidden Tk root is created when the module is first imported.
 
 ---
 
-## Coordinate System
+## Actions
 
-Computer-use models operate using normalized coordinates in the range:
+The model can call these functions. All are gated except `take_screenshot` and `return_control`.
 
-```text
-0 → 999
-```
+| Group | Functions |
+|---|---|
+| Mouse clicks | `click`, `double_click`, `triple_click`, `middle_click`, `right_click` |
+| Mouse movement | `move`, `mouse_down`, `mouse_up`, `drag_and_drop` |
+| Scrolling | `scroll` (up, down, left, right; default 3 wheel clicks) |
+| Keyboard | `type` (optionally presses Enter after), `press_key`, `key_down`, `key_up`, `hotkey` |
+| Timing | `wait` |
+| Vision | `take_screenshot` (a no-op in practice: the model already gets a fresh screenshot every turn) |
+| Control | `return_control` (see below) |
 
-Handoff converts these coordinates into actual screen pixels based on the current display resolution.
+Coordinates are normalized to `0-999` and converted with:
 
 ```python
 x_pixel = x / 999 * screen_width
 y_pixel = y / 999 * screen_height
 ```
 
-This allows model-generated coordinates to remain independent of the user's actual screen resolution.
+Two things to know: `type` uses `pyautogui.typewrite`, so it handles ASCII text only; and coordinates are not bounds-checked.
+
+### `return_control`
+
+The model uses this to hand control back to you. It takes two required arguments:
+
+- `status`: `done` (task finished), `need_input` (it needs information or a decision from you), or `stuck` (it cannot make progress).
+- `message`: 1-3 sentences written for you.
+
+Handoff shows the message in a dialog titled for the status. If you type a reply, it is sent to the model as `The user replied: ...` and the run continues. If you leave the box blank or cancel, the run ends. The model is told to call `return_control` alone; if it batches other actions with it, the later ones are skipped and reported.
 
 ---
 
-## Interaction Lifecycle
+## Turns and results
 
-A simplified version of the internal flow looks like this:
+Every action returns a `Result(outcome, message)`. The loop switches on the outcome rather than parsing text.
 
-```plaintext
-task
-  ↓
-capture screenshot
-  ↓
-send task + screenshot to Gemini
-  ↓
-receive interaction steps
-  ↓
-for each step:
-    ├── model output → display it
-    │
-    └── function call
-          ↓
-       dispatch action
-          ↓
-       safety gate
-          ↓
-       PyAutoGUI
-          ↓
-       report result
-  ↓
-capture new screenshot
-  ↓
-continue interaction
+| Outcome | Meaning | Stops the rest of the turn? |
+|---|---|---|
+| `OK` | The action ran. | No |
+| `DENIED` | You clicked No in the confirmation dialog. | Yes |
+| `BLOCKED` | The model's own safety decision blocked the action. | Yes |
+| `UNKNOWN_FUNCTION` | The model called a name Handoff has no handler for. | Yes |
+| `RETURN_CONTROL` | The model handed control back and you replied. | Yes |
+| `END_RUN` | You left the `return_control` dialog blank or cancelled it. | Yes (and the loop exits) |
+
+`run_turn` rules:
+
+- Calls run in order, `ACTION_GAP_SECONDS` apart.
+- Only `OK` lets the next call run.
+- When a call stops the turn, the remaining calls are not executed, and the model is told which ones were skipped.
+- When a turn has more than `MAX_ACTIONS_PER_TURN` calls, the extras are not executed and the model is told which ones.
+- Result messages and skipped-action notes are joined into one text block and sent with the next screenshot. The system prompt explains each message to the model.
+
+---
+
+## Safety
+
+A computer-use action can carry a `safety_decision`. The `@gated` decorator checks it before the action runs:
+
+- `require_confirmation`: a Yes/No dialog shows the model's explanation. Yes runs the action; No returns `DENIED`. The dialog has no timeout.
+- `blocked`: the action does not run, a warning dialog shows the reason, and the result is `BLOCKED`.
+- Any other value, or no `safety_decision`: the action runs.
+
+The system prompt also tells the model not to invent passwords, codes or payment details, to stay within the task, and to ask when something is ambiguous. This is a prototype safety mechanism, not a security boundary: it depends on the model flagging risky actions, and the prompt is guidance, not enforcement.
+
+---
+
+## Logs
+
+Each run writes `convo_history/chat_YYYYMMDD_HHMMSS.md` containing the task and, for every interaction, the full model response as JSON. These files are git-ignored. When something goes wrong, the log helps tell apart a wrong model decision, an unexpected screen state, an unsupported action, and a bug in the loop.
+
+The console also prints the model's text output, each action with its stated intent, and the result of any action that did not return `OK`.
+
+---
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -t . -v
 ```
 
-The dispatcher is intentionally centralized, making it straightforward to add or replace executable actions.
+36 tests across five files: `test_results.py`, `test_return_control.py`, `test_batching.py`, `test_loop.py` and `test_prompts.py`. `tests/stubs.py` replaces PyAutoGUI, the Tk dialogs, google-genai, python-dotenv and `config.py` before any project module is imported, so the tests need no display, API key or network and cannot move your mouse.
 
 ---
 
-## Supported Gemini Models
+## Limitations
 
-Handoff is designed around Gemini's **computer-use capability through the Interactions API** rather than being tied to a single model (Default to `gemini-3.5-flash-lite`). 
-
-The model is passed when creating an interaction, so the configured model can be changed without changing the execution architecture.
-
----
-
-## Current Limitations
-
-Handoff is still a prototype.
-
-### Tested on Windows only
-
-The Windows-only `winsound` dependency has been removed, so the code should no longer fail to import on macOS or Linux, but it has not been tested there. Platform differences in PyAutoGUI (e.g. macOS accessibility permissions, Linux/X11 vs Wayland screenshots), scroll behavior and key names may still need work.
-
-### Screen-level automation
-
-Handoff interacts with applications through the computer's graphical interface rather than through application-specific APIs.
-
-That makes the system flexible, but also means performance depends on factors such as:
-
-* Screen layout
-* Application state
-* Visual changes
-* Model accuracy
-* Timing of UI updates
-
-### Prototype safety model
-
-The current confirmation mechanism is intentionally simple: the user can approve or deny a gated action through a Yes/No dialog.
-
-It should be treated as a prototype safety mechanism rather than a complete security boundary.
-
----
-
-## Why Handoff?
-
-Traditional automation usually requires you to explicitly describe the steps:
-
-```text
-1. Open the browser
-2. Click the address bar
-3. Type the URL
-4. Press Enter
-5. Click the button
-...
-```
-
-Handoff instead aims for:
-
-```text
-"Open the website and complete the task."
-```
-
-The model determines the intermediate actions from what it sees on the screen.
-
-That makes the automation layer more flexible and potentially applicable to applications that do not expose convenient APIs.
-
----
-
-## Development
-
-The project is intentionally structured around three main responsibilities:
-
-```text
-Vision
-  └── screenshots and image encoding
-
-Reasoning
-  └── Gemini computer-use model
-
-Execution
-  └── mouse and keyboard control
-```
-
-Keeping these responsibilities separate makes it easier to experiment with different models, execution methods, and safety mechanisms without rewriting the entire agent.
-
----
-
-## Debugging
-
-When something goes wrong, check the generated files in:
-
-```text
-convo_history/
-```
-
-Each run creates a timestamped Markdown file containing the task and interaction data returned by Gemini.
-
-This is often the easiest way to determine whether a failure came from:
-
-* The model's decision
-* An unexpected screen state
-* An unsupported action
-* The execution layer
-* The interaction loop
-
----
+- **Tested on Windows only.** The code contains nothing Windows-specific, and the system prompt adapts to the detected OS, but macOS and Linux are untested. Things that may differ there: PyAutoGUI permissions (macOS accessibility and screen recording), X11 vs Wayland screenshots, modifier key names (`command` vs `ctrl`), and how far a "wheel click" scrolls (`_SCROLL_UNIT` in `hands.py`).
+- **No per-action error handling yet.** If an action raises (for example `scroll` with an invalid direction), or an API call fails mid-run, the loop shows an error dialog and ends.
+- **Screen-level automation.** Results depend on the screen layout, app state, UI timing and model accuracy. The full screenshot is sent every turn, so each turn costs model latency.
+- **Single primary display; screen size read once** at startup.
+- **Prototype safety model.** See [Safety](#safety).
+- **No stuck detection.** The model is told to stop after repeating an action twice, but Handoff does not check whether the screen actually changed.
 
 ## Roadmap
 
-Handoff is currently a prototype, so the architecture is expected to evolve.
+Planned or under consideration:
 
-Potential future work includes:
-
-* Cross-platform computer control
-* More robust safety mechanisms
-* Better error recovery
-* Improved state handling
-* More execution primitives
-* Better observability and debugging
-* More reliable long-running task execution
-
----
+- Per-step error handling with an `ERROR` outcome
+- A benchmark to compare models and thinking levels (turns, time, success)
+- Smaller screenshots (JPEG, downscaling, `media_resolution`)
+- Shorter per-turn model output
+- Checking how parallel function calling expects results to be returned
+- Stuck detection from screenshot comparison
+- Cross-platform support and stronger safety mechanisms
